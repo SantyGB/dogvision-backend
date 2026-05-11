@@ -1,58 +1,78 @@
 """
-DogVision – Backend real con modelo HuggingFace
-Modelo: jhoppanne/Dogs-Breed-Image-Classification-V2 (120 razas)
-Compatible 100% con el frontend Angular (dogvision-angular)
+DogVision – Backend de prueba (mock)
+Imita exactamente la API que consume el frontend Angular.
+
+Endpoints:
+  GET  /health    → estado del modelo
+  POST /predict   → analiza imagen y retorna predicciones de raza
+  GET  /classes   → lista de razas disponibles
+  GET  /metrics   → métricas del modelo
 """
 
-import io
+import random
 import time
-import threading
+import base64
+import io
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-from PIL import Image
 
-app = FastAPI(title="DogVision Real API", version="2.1.0")
+app = FastAPI(title="DogVision Mock API", version="1.0.0")
 
+# ── CORS ──────────────────────────────────────────────────────────────────────
+# Permite peticiones desde el frontend Angular (localhost:4200)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:4200", "http://127.0.0.1:4200"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-model_pipeline = None
-LABELS = []
-load_error = ""
+# ── Datos de prueba ───────────────────────────────────────────────────────────
 
-def load_model():
-    global model_pipeline, LABELS, load_error
-    models_to_try = [
-        "jhoppanne/Dogs-Breed-Image-Classification-V2",
-        "skyau/dog-breed-classifier-vit",
-        "wesleyacheng/dog-breed-multiclass-image-classification-with-vit",
-    ]
-    for model_name in models_to_try:
-        try:
-            print(f"Intentando cargar: {model_name}")
-            from transformers import pipeline as hf_pipeline
-            model_pipeline = hf_pipeline(
-                "image-classification",
-                model=model_name,
-                top_k=5,
-            )
-            LABELS = sorted(set(model_pipeline.model.config.id2label.values()))
-            print(f"Modelo cargado: {model_name} — {len(LABELS)} razas")
-            load_error = ""
-            return
-        except Exception as e:
-            load_error = f"{model_name}: {str(e)}"
-            print(f"Error con {model_name}: {e}")
-            model_pipeline = None
+BREEDS = [
+    "n02085620-Chihuahua",
+    "n02086240-Shih-Tzu",
+    "n02086646-Blenheim_spaniel",
+    "n02088238-beagle",
+    "n02088364-beagle",
+    "n02089973-English_foxhound",
+    "n02090379-redbone",
+    "n02090622-borzoi",
+    "n02091032-Italian_greyhound",
+    "n02091467-Norwegian_elkhound",
+    "n02093256-Staffordshire_bullterrier",
+    "n02093428-American_Staffordshire_terrier",
+    "n02095314-wire-haired_fox_terrier",
+    "n02096294-Australian_terrier",
+    "n02096437-Dandie_Dinmont",
+    "n02097298-Scotch_terrier",
+    "n02099601-golden_retriever",
+    "n02099712-Labrador_retriever",
+    "n02105505-komondor",
+    "n02106550-Rottweiler",
+    "n02107574-Greater_Swiss_Mountain_dog",
+    "n02108000-EntleBucher",
+    "n02108915-French_bulldog",
+    "n02109525-Saint_Bernard",
+    "n02110185-Siberian_husky",
+    "n02110627-affenpinscher",
+    "n02111129-Leonberg",
+    "n02111500-Great_Pyrenees",
+    "n02112018-Pomeranian",
+    "n02113023-Pembroke",
+    "n02113624-toy_poodle",
+    "n02113712-miniature_poodle",
+    "n02113799-standard_poodle",
+    "n02114367-timber_wolf",
+    "n02115641-dingo",
+    "n02116738-African_hunting_dog",
+]
 
-threading.Thread(target=load_model, daemon=True).start()
+
+# ── Modelos Pydantic ──────────────────────────────────────────────────────────
 
 class BreedPrediction(BaseModel):
     breed: str
@@ -72,78 +92,117 @@ class HealthResponse(BaseModel):
     device: str
     model_exists: bool
 
-TINY_PNG = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
-    "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
-)
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def make_fake_gradcam_png() -> str:
+    """Genera un PNG mínimo en base64 que simula un mapa GradCAM."""
+    try:
+        from PIL import Image, ImageDraw
+        import numpy as np
+
+        w, h = 224, 224
+        img = Image.new("RGB", (w, h), (20, 20, 80))
+        draw = ImageDraw.Draw(img)
+        # Mancha de calor simulada
+        for r in range(80, 0, -10):
+            alpha = int(255 * (1 - r / 80))
+            color = (255, alpha, 0)
+            draw.ellipse(
+                [w // 2 - r, h // 2 - r, w // 2 + r, h // 2 + r],
+                fill=color,
+            )
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode()
+    except ImportError:
+        # Si Pillow no está, retorna un PNG de 1×1 transparente
+        TINY_PNG = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+            "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        )
+        return TINY_PNG
+
+
+def generate_predictions(top_breed: str) -> list[BreedPrediction]:
+    """Genera 5 predicciones coherentes con confidencias que suman ~1."""
+    other_breeds = [b for b in BREEDS if b != top_breed]
+    picked = random.sample(other_breeds, 4)
+
+    top_conf = random.uniform(0.55, 0.92)
+    remaining = 1.0 - top_conf
+    confs = sorted([random.random() for _ in range(3)], reverse=True)
+    total = sum(confs)
+    confs = [c / total * remaining for c in confs]
+    confs.append(remaining - sum(confs))
+
+    predictions = [BreedPrediction(breed=top_breed, confidence=top_conf)]
+    for breed, conf in zip(picked, confs):
+        predictions.append(BreedPrediction(breed=breed, confidence=max(0.001, conf)))
+
+    return predictions
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    loaded = model_pipeline is not None
     return HealthResponse(
-        status="ok" if loaded else "loading",
-        model_loaded=loaded,
-        num_classes=len(LABELS),
+        status="ok",
+        model_loaded=True,
+        num_classes=len(BREEDS),
         device="cpu",
-        model_exists=loaded,
+        model_exists=True,
     )
 
-@app.get("/debug")
-def debug():
-    return {
-        "model_loaded": model_pipeline is not None,
-        "last_error": load_error,
-        "labels_count": len(LABELS),
-    }
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict(file: UploadFile = File(...)):
-    if model_pipeline is None:
-        raise HTTPException(status_code=503, detail="Modelo cargando, intenta en unos segundos.")
-
+    # Validar que es imagen
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="El archivo debe ser una imagen.")
 
-    try:
-        contents = await file.read()
-        image = Image.open(io.BytesIO(contents)).convert("RGB")
-    except Exception:
-        raise HTTPException(status_code=400, detail="No se pudo procesar la imagen.")
+    await file.read()  # simulamos leerla
 
+    # Simular latencia de inferencia
     start = time.time()
-    results = model_pipeline(image)
-    inference_ms = round((time.time() - start) * 1000, 1)
+    time.sleep(random.uniform(0.3, 0.8))
+    inference_ms = (time.time() - start) * 1000
 
-    predictions = [
-        BreedPrediction(breed=r["label"].replace(" ", "_"), confidence=round(r["score"], 6))
-        for r in results
-    ]
-    top = predictions[0]
+    top_breed = random.choice(BREEDS)
+    predictions = generate_predictions(top_breed)
+
+    # GradCAM simulado (50 % de probabilidad de incluirlo)
+    gradcam = make_fake_gradcam_png() if random.random() > 0.5 else None
 
     return PredictResponse(
         predictions=predictions,
-        top_breed=top.breed,
-        top_confidence=top.confidence,
-        gradcam_base64=TINY_PNG,
-        inference_ms=inference_ms,
+        top_breed=top_breed,
+        top_confidence=predictions[0].confidence,
+        gradcam_base64=gradcam,
+        inference_ms=round(inference_ms, 1),
     )
+
 
 @app.get("/classes")
 def get_classes():
-    keys = [l.replace(" ", "_") for l in LABELS]
-    return {"classes": keys, "count": len(keys)}
+    return {"classes": BREEDS, "count": len(BREEDS)}
+
 
 @app.get("/metrics")
 def get_metrics():
     return {
-        "accuracy_top1": 0.891,
-        "accuracy_top5": 0.973,
-        "total_predictions": 0,
-        "avg_inference_ms": 0,
-        "model_name": "Dogs-Breed-Image-Classification-V2",
-        "num_classes": len(LABELS),
+        "accuracy_top1": 0.834,
+        "accuracy_top5": 0.961,
+        "total_predictions": random.randint(200, 5000),
+        "avg_inference_ms": round(random.uniform(180, 450), 1),
+        "model_name": "DogVisionMock-v1",
+        "num_classes": len(BREEDS),
     }
+
+
+# ── Entrypoint ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
