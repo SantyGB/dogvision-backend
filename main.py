@@ -1,6 +1,6 @@
 """
 DogVision – Backend real con modelo HuggingFace
-Usa el modelo preentrenado: Falconsai/dog_breed_classification
+Modelo: jhoppanne/Dogs-Breed-Image-Classification-V2 (120 razas)
 Compatible 100% con el frontend Angular (dogvision-angular)
 """
 
@@ -15,7 +15,6 @@ from PIL import Image
 
 app = FastAPI(title="DogVision Real API", version="2.1.0")
 
-# ── CORS ──────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,29 +23,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Estado global ─────────────────────────────────────────────────────────────
 model_pipeline = None
 LABELS = []
+load_error = ""
 
 def load_model():
-    global model_pipeline, LABELS
-    print("Cargando modelo de HuggingFace...")
-    try:
-        from transformers import pipeline as hf_pipeline
-        model_pipeline = hf_pipeline(
-            "image-classification",
-            model="Falconsai/dog_breed_classification",
-            top_k=5,
-        )
-        LABELS = sorted(set(model_pipeline.model.config.id2label.values()))
-        print(f"Modelo cargado — {len(LABELS)} razas disponibles")
-    except Exception as e:
-        print(f"Error cargando modelo: {e}")
+    global model_pipeline, LABELS, load_error
+    models_to_try = [
+        "jhoppanne/Dogs-Breed-Image-Classification-V2",
+        "skyau/dog-breed-classifier-vit",
+        "wesleyacheng/dog-breed-multiclass-image-classification-with-vit",
+    ]
+    for model_name in models_to_try:
+        try:
+            print(f"Intentando cargar: {model_name}")
+            from transformers import pipeline as hf_pipeline
+            model_pipeline = hf_pipeline(
+                "image-classification",
+                model=model_name,
+                top_k=5,
+            )
+            LABELS = sorted(set(model_pipeline.model.config.id2label.values()))
+            print(f"Modelo cargado: {model_name} — {len(LABELS)} razas")
+            load_error = ""
+            return
+        except Exception as e:
+            load_error = f"{model_name}: {str(e)}"
+            print(f"Error con {model_name}: {e}")
+            model_pipeline = None
 
-# Carga el modelo en un hilo para no bloquear el arranque
 threading.Thread(target=load_model, daemon=True).start()
 
-# ── Modelos Pydantic ──────────────────────────────────────────────────────────
 class BreedPrediction(BaseModel):
     breed: str
     confidence: float
@@ -65,16 +72,11 @@ class HealthResponse(BaseModel):
     device: str
     model_exists: bool
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def breed_to_key(label: str) -> str:
-    return label.replace(" ", "_")
-
 TINY_PNG = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
     "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 )
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.get("/health", response_model=HealthResponse)
 def health():
     loaded = model_pipeline is not None
@@ -85,6 +87,14 @@ def health():
         device="cpu",
         model_exists=loaded,
     )
+
+@app.get("/debug")
+def debug():
+    return {
+        "model_loaded": model_pipeline is not None,
+        "last_error": load_error,
+        "labels_count": len(LABELS),
+    }
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict(file: UploadFile = File(...)):
@@ -101,14 +111,11 @@ async def predict(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="No se pudo procesar la imagen.")
 
     start = time.time()
-    try:
-        results = model_pipeline(image)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en inferencia: {str(e)}")
+    results = model_pipeline(image)
     inference_ms = round((time.time() - start) * 1000, 1)
 
     predictions = [
-        BreedPrediction(breed=breed_to_key(r["label"]), confidence=round(r["score"], 6))
+        BreedPrediction(breed=r["label"].replace(" ", "_"), confidence=round(r["score"], 6))
         for r in results
     ]
     top = predictions[0]
@@ -123,7 +130,7 @@ async def predict(file: UploadFile = File(...)):
 
 @app.get("/classes")
 def get_classes():
-    keys = [breed_to_key(l) for l in LABELS]
+    keys = [l.replace(" ", "_") for l in LABELS]
     return {"classes": keys, "count": len(keys)}
 
 @app.get("/metrics")
@@ -133,7 +140,7 @@ def get_metrics():
         "accuracy_top5": 0.973,
         "total_predictions": 0,
         "avg_inference_ms": 0,
-        "model_name": "Falconsai/dog_breed_classification",
+        "model_name": "Dogs-Breed-Image-Classification-V2",
         "num_classes": len(LABELS),
     }
 
